@@ -1,0 +1,94 @@
+# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Fusion Architecture: SNN-YOLOv8 + LiquidSSM (Backbone) + SDR (Head)
+# Innovation 1: LiquidSSM Block in P5 for global temporal modeling
+# Innovation 2: Spiking Dynamic Routing (SDR) in Neck for adaptive feature fusion
+
+# Parameters
+nc: 80  # 根据你的数据集修改
+scales: # model compound scaling constants
+  # [depth, width, max_channels]
+  n: [0.33, 0.25, 1024]
+  s: [0.33, 0.50, 1024]
+  m: [0.67, 0.75, 768]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.25, 512]
+
+# Backbone
+backbone:
+  # [from, repeats, module, args]
+
+  # 0. 时间维度扩展
+  - [-1, 1, MS_GetT, [3, 1]]
+
+  # 1. Stem 下采样
+  - [-1, 1, MS_DownSampling, [128, 7, 4, 2, True]]
+
+  # 2. Stage 1 (P2)
+  - [-1, 3, MS_AllConvBlock, [4, 7]]
+
+  # 3. Downsample -> P3
+  - [-1, 1, MS_DownSampling, [256, 3, 2, 1, False]]
+
+  # 4. Stage 2 (P3) - Output for Neck
+  - [-1, 6, MS_AllConvBlock, [4, 7]]
+
+  # 5. Downsample -> P4
+  - [-1, 1, MS_DownSampling, [512, 3, 2, 1, False]]
+
+  # 6. Stage 3 (P4) - Output for Neck
+  - [-1, 9, MS_ConvBlock, [3, 7]]
+
+  # 7. Downsample -> P5
+  - [-1, 1, MS_DownSampling, [1024, 3, 2, 1, False]]
+
+  # =========================================================
+  # 👑 创新点 1: LiquidSSM 全局建模 (Backbone P5)
+  # 8. 替换原有的 MS_ConvBlock，增强全局感受野
+  # =========================================================
+  - [-1, 1, LiquidSSM_Block, [1024]]
+
+  # 9. SPPF
+  - [-1, 1, SpikeSPPF, [1024, 5]]
+
+# Head (Neck + Detect)
+# Head (Neck + Detect)
+head:
+  # --- Top-Down Path --- (10-17层保持不变)
+  - [-1, 1, MS_StandardConv, [512, 1, 1]]           # 10
+  - [-1, 1, nn.Upsample, [None, '(1,2,2)', 'nearest']] # 11
+  - [[-1, 6], 1, SpikingDynamicRouting, [512]]      # 12
+  - [-1, 1, MS_ConvBlock, [3, 7]]                   # 13
+
+  - [-1, 1, MS_StandardConv, [256, 1, 1]]           # 14
+  - [-1, 1, nn.Upsample, [None, '(1,2,2)', 'nearest']] # 15
+  - [[-1, 4], 1, SpikingDynamicRouting, [256]]      # 16
+  - [-1, 1, MS_AllConvBlock, [4, 7]]                # 17
+
+  # =========================================================
+  # 👑 优化点: P3 输出增强 (Detect Input 1)
+  # =========================================================
+  - [-1, 1, MS_AllConvBlock, [4, 7]]                # 18
+  - [-1, 1, SpikingEMA, [256]]                      # 19 (新插入)
+
+  # --- Bottom-Up Path ---
+  - [-1, 1, MS_StandardConv, [256, 3, 2]]           # 20 (原19)
+  - [[-1, 14], 1, SpikingDynamicRouting, [512]]     # 21 (原20)
+
+  # =========================================================
+  # 👑 优化点: P4 输出增强 (Detect Input 2)
+  # =========================================================
+  - [-1, 1, MS_ConvBlock, [3, 7]]                   # 22 (原21)
+  - [-1, 1, SpikingEMA, [512]]                      # 23 (新插入)
+
+  - [-1, 1, MS_StandardConv, [512, 3, 2]]           # 24 (原22)
+  - [[-1, 10], 1, SpikingDynamicRouting, [1024]]    # 25 (原23)
+
+  # =========================================================
+  # 👑 优化点: P5 输出增强 (Detect Input 3)
+  # =========================================================
+  - [-1, 1, MS_ConvBlock, [1, 7]]                   # 26 (原24)
+  - [-1, 1, SpikingEMA, [1024]]                     # 27 (新插入)
+
+  # --- Detect Head ---
+  # 注意：这里的输入索引需更新为 EMA 后的层：[19, 23, 27]
+  - [[19, 23, 27], 1, SpikeDetect, [nc]]            # 28
